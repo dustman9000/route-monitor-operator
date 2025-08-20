@@ -394,7 +394,7 @@ var _ = Describe("CR Deployment Handling", func() {
 			client := mockClient
 			ctx := context.Background()
 			result := reconcilecommon.NewMonitorResourceCommon(ctx, client)
-
+			
 			Expect(result.Client).To(Equal(client))
 			Expect(result.Ctx).To(Equal(ctx))
 			Expect(result.Comparer).NotTo(BeNil())
@@ -403,18 +403,18 @@ var _ = Describe("CR Deployment Handling", func() {
 
 	Describe("ResourceComparer", func() {
 		var comparer reconcilecommon.ResourceComparer
-
+		
 		Describe("DeepEqual", func() {
 			It("should return true for equal values", func() {
 				result := comparer.DeepEqual("test", "test")
 				Expect(result).To(BeTrue())
 			})
-
+			
 			It("should return false for different values", func() {
 				result := comparer.DeepEqual("test1", "test2")
 				Expect(result).To(BeFalse())
 			})
-
+			
 			It("should return true for equal structs", func() {
 				struct1 := v1alpha1.RouteMonitor{ObjectMeta: metav1.ObjectMeta{Name: "test"}}
 				struct2 := v1alpha1.RouteMonitor{ObjectMeta: metav1.ObjectMeta{Name: "test"}}

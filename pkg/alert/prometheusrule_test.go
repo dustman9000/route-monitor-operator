@@ -205,7 +205,7 @@ var _ = Describe("CR Deployment Handling", func() {
 			client := mockClient
 			ctx := context.Background()
 			result := alert.NewPrometheusRule(ctx, client)
-
+			
 			Expect(result.Client).To(Equal(client))
 			Expect(result.Ctx).To(Equal(ctx))
 			Expect(result.Comparer).NotTo(BeNil())
