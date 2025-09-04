@@ -46,6 +46,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	dynatrace "github.com/openshift/route-monitor-operator/pkg/dynatrace"
+	"github.com/openshift/route-monitor-operator/pkg/rhobs"
 )
 
 const (
@@ -70,14 +71,16 @@ var logger logr.Logger = ctrl.Log.WithName("controllers").WithName("HostedContro
 // HostedControlPlaneReconciler reconciles a HostedControlPlane object
 type HostedControlPlaneReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme      *runtime.Scheme
+	ProbeAPIURL string
 }
 
 // NewHostedControlPlaneReconciler creates a HostedControlPlaneReconciler
-func NewHostedControlPlaneReconciler(mgr manager.Manager) *HostedControlPlaneReconciler {
+func NewHostedControlPlaneReconciler(mgr manager.Manager, probeAPIURL string) *HostedControlPlaneReconciler {
 	return &HostedControlPlaneReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		ProbeAPIURL: probeAPIURL,
 	}
 }
 
@@ -119,6 +122,19 @@ func (r *HostedControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if err != nil {
 			log.Error(err, "failed to delete Dynatrace HTTP Monitor Resources")
 			return utilreconcile.RequeueWith(err)
+		}
+
+		// Delete RHOBS probe if API URL is configured
+		if r.ProbeAPIURL != "" {
+			err = r.deleteRHOBSProbe(ctx, log, hostedcontrolplane)
+			if err != nil {
+				log.Error(err, "failed to delete RHOBS probe")
+				// Check if it's a non-200 error and requeue
+				if rhobs.IsNon200Error(err) {
+					return utilreconcile.RequeueAfter(5 * time.Minute), nil
+				}
+				return utilreconcile.RequeueWith(err)
+			}
 		}
 
 		err := r.finalizeHostedControlPlane(ctx, log, hostedcontrolplane)
@@ -170,6 +186,20 @@ func (r *HostedControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err != nil {
 		log.Error(err, "failed to deploy Dynatrace HTTP Monitor Resources")
 		return utilreconcile.RequeueWith(err)
+	}
+
+	// Deploy RHOBS probe if API URL is configured
+	if r.ProbeAPIURL != "" {
+		log.Info("Deploying RHOBS probe")
+		err = r.ensureRHOBSProbe(ctx, log, hostedcontrolplane)
+		if err != nil {
+			log.Error(err, "failed to deploy RHOBS probe")
+			// Check if it's a non-200 error and requeue
+			if rhobs.IsNon200Error(err) {
+				return utilreconcile.RequeueAfter(5 * time.Minute), nil
+			}
+			return utilreconcile.RequeueWith(err)
+		}
 	}
 
 	return ctrl.Result{}, err
@@ -613,5 +643,75 @@ func deleteDynatraceHttpMonitorResources(dynatraceApiClient *dynatrace.Dynatrace
 		return fmt.Errorf("error deleting HTTP monitor(s). Status Code: %v", err)
 	}
 	log.Info("Successfully deleted HTTP monitor(s)")
+	return nil
+}
+
+// ensureRHOBSProbe ensures that a RHOBS probe exists for the HostedControlPlane
+func (r *HostedControlPlaneReconciler) ensureRHOBSProbe(ctx context.Context, log logr.Logger, hostedcontrolplane *hypershiftv1beta1.HostedControlPlane) error {
+	clusterID := hostedcontrolplane.Spec.ClusterID
+	if clusterID == "" {
+		return fmt.Errorf("cluster ID is empty")
+	}
+
+	// Get API server URL
+	apiServerURL, err := GetAPIServerHostname(hostedcontrolplane)
+	if err != nil {
+		return fmt.Errorf("failed to get API server hostname: %w", err)
+	}
+	apiServerURL = fmt.Sprintf("https://%s/livez", apiServerURL)
+
+	// Create RHOBS client - for now using a placeholder tenant, should be configurable
+	client := rhobs.NewClient(r.ProbeAPIURL, "placeholder-tenant", log)
+
+	// Check if probe already exists
+	existingProbe, err := client.GetProbe(ctx, clusterID)
+	if err != nil {
+		return fmt.Errorf("failed to check existing probe: %w", err)
+	}
+
+	if existingProbe != nil {
+		log.V(2).Info("RHOBS probe already exists", "cluster_id", clusterID, "probe_id", existingProbe.ID)
+		return nil
+	}
+
+	// Determine if cluster is private
+	isPrivate := hostedcontrolplane.Spec.Platform.AWS != nil &&
+		hostedcontrolplane.Spec.Platform.AWS.EndpointAccess == hypershiftv1beta1.Private
+
+	// Create probe request
+	probeReq := rhobs.ProbeRequest{
+		ClusterID:    clusterID,
+		APIServerURL: apiServerURL,
+		Private:      isPrivate,
+		// ManagementClusterID can be added if needed
+	}
+
+	// Create the probe
+	probe, err := client.CreateProbe(ctx, probeReq)
+	if err != nil {
+		return fmt.Errorf("failed to create RHOBS probe: %w", err)
+	}
+
+	log.Info("Successfully created RHOBS probe", "cluster_id", clusterID, "probe_id", probe.ID)
+	return nil
+}
+
+// deleteRHOBSProbe deletes the RHOBS probe for the HostedControlPlane
+func (r *HostedControlPlaneReconciler) deleteRHOBSProbe(ctx context.Context, log logr.Logger, hostedcontrolplane *hypershiftv1beta1.HostedControlPlane) error {
+	clusterID := hostedcontrolplane.Spec.ClusterID
+	if clusterID == "" {
+		return fmt.Errorf("cluster ID is empty")
+	}
+
+	// Create RHOBS client - for now using a placeholder tenant, should be configurable
+	client := rhobs.NewClient(r.ProbeAPIURL, "placeholder-tenant", log)
+
+	// Delete the probe
+	err := client.DeleteProbe(ctx, clusterID)
+	if err != nil {
+		return fmt.Errorf("failed to delete RHOBS probe: %w", err)
+	}
+
+	log.Info("Successfully deleted RHOBS probe", "cluster_id", clusterID)
 	return nil
 }

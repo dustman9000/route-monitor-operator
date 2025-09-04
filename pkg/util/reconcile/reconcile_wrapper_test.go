@@ -12,7 +12,7 @@ import (
 )
 
 var _ = Describe("ReconcileWrapper", func() {
-	
+
 	Describe("Result.Convert", func() {
 		It("should convert Result to ctrl.Result correctly", func() {
 			result := reconcile.Result{
@@ -20,9 +20,9 @@ var _ = Describe("ReconcileWrapper", func() {
 				RequeueAfter: 5 * time.Second,
 				Continue:     false,
 			}
-			
+
 			ctrlResult := result.Convert()
-			
+
 			Expect(ctrlResult.Requeue).To(BeTrue())
 			Expect(ctrlResult.RequeueAfter).To(Equal(5 * time.Second))
 		})
@@ -35,9 +35,9 @@ var _ = Describe("ReconcileWrapper", func() {
 				RequeueAfter: 5 * time.Second,
 			}
 			testError := errors.New("test error")
-			
+
 			ctrlResult, err := result.ReturnWith(testError)
-			
+
 			Expect(ctrlResult.Requeue).To(BeTrue())
 			Expect(ctrlResult.RequeueAfter).To(Equal(5 * time.Second))
 			Expect(err).To(Equal(testError))
@@ -47,7 +47,7 @@ var _ = Describe("ReconcileWrapper", func() {
 	Describe("Stop", func() {
 		It("should return empty ctrl.Result and no error", func() {
 			ctrlResult, err := reconcile.Stop()
-			
+
 			Expect(ctrlResult).To(Equal(ctrl.Result{}))
 			Expect(err).NotTo(HaveOccurred())
 		})
@@ -56,9 +56,9 @@ var _ = Describe("ReconcileWrapper", func() {
 	Describe("RequeueWith", func() {
 		It("should return empty ctrl.Result and the provided error", func() {
 			testError := errors.New("test error")
-			
+
 			ctrlResult, err := reconcile.RequeueWith(testError)
-			
+
 			Expect(ctrlResult).To(Equal(ctrl.Result{}))
 			Expect(err).To(Equal(testError))
 		})
@@ -67,7 +67,7 @@ var _ = Describe("ReconcileWrapper", func() {
 	Describe("Requeue", func() {
 		It("should return ctrl.Result with Requeue true and no error", func() {
 			ctrlResult, err := reconcile.Requeue()
-			
+
 			Expect(ctrlResult.Requeue).To(BeTrue())
 			Expect(ctrlResult.RequeueAfter).To(Equal(time.Duration(0)))
 			Expect(err).NotTo(HaveOccurred())
@@ -77,9 +77,9 @@ var _ = Describe("ReconcileWrapper", func() {
 	Describe("RequeueAfter", func() {
 		It("should return ctrl.Result with RequeueAfter set", func() {
 			duration := 10 * time.Second
-			
+
 			ctrlResult := reconcile.RequeueAfter(duration)
-			
+
 			Expect(ctrlResult.RequeueAfter).To(Equal(duration))
 			Expect(ctrlResult.Requeue).To(BeFalse())
 		})
@@ -117,7 +117,7 @@ var _ = Describe("ReconcileWrapper", func() {
 	Describe("RequeueReconcile", func() {
 		It("should return Result with Requeue true and no error", func() {
 			result, err := reconcile.RequeueReconcile()
-			
+
 			Expect(result.Requeue).To(BeTrue())
 			Expect(result.Continue).To(BeFalse())
 			Expect(err).NotTo(HaveOccurred())
