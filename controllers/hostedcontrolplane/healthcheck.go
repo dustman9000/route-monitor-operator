@@ -190,7 +190,7 @@ func healthcheckHostedControlPlane(hostedcontrolplane *hypershiftv1beta1.HostedC
 	var url string
 	var secure bool
 	if hostedcontrolplane.Spec.Platform.AWS != nil &&
-		hostedcontrolplane.Spec.Platform.AWS.EndpointAccess == hypershiftv1beta1.Private {
+		hostedcontrolplane.Spec.Platform.AWS.EndpointAccess != hypershiftv1beta1.Public {
 		url = fmt.Sprintf("https://kube-apiserver.%s.svc.cluster.local:6443/livez", hostedcontrolplane.Namespace)
 		secure = false
 	} else {
