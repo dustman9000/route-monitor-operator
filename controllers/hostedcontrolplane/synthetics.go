@@ -120,7 +120,10 @@ func getDynatraceEquivalentClusterRegionName(clusterRegion string) (string, erro
 func GetAPIServerHostname(hostedcontrolplane *hypershiftv1beta1.HostedControlPlane) (string, error) {
 	for _, service := range hostedcontrolplane.Spec.Services {
 		if service.Service == "APIServer" {
-			return service.Route.Hostname, nil
+			if service.Route != nil && service.Route.Hostname != "" {
+				return service.Route.Hostname, nil
+			}
+			return "", fmt.Errorf("APIServer Route hostname is empty (service type: %s)", service.Type)
 		}
 	}
 	return "", fmt.Errorf("APIServer service not found in the hostedcontrolplane")
@@ -283,8 +286,27 @@ func (r *HostedControlPlaneReconciler) ensureRHOBSProbe(ctx context.Context, log
 	isPrivate := hostedcontrolplane.Spec.Platform.AWS != nil &&
 		hostedcontrolplane.Spec.Platform.AWS.EndpointAccess == hypershiftv1beta1.Private
 
-	// Check if cluster is in limited support -- delete probe if it exists and skip creation
+	// Check if cluster is in limited support -- delete probe if it exists and skip creation.
+	// Cross-check the HostedCluster CR label as the source of truth, since the HCP label
+	// can become stale when LS is removed (OCPBUGS-85584: reconcileHostedControlPlane
+	// only does additive label sync, never removes deleted labels).
+	isLimitedSupport := false
 	if hostedcontrolplane.Labels["api.openshift.com/limited-support"] == "true" {
+		// HCP says LS, but verify against the HC which is the authoritative source
+		hcNamespace := strings.TrimSuffix(hostedcontrolplane.Namespace, "-"+hostedcontrolplane.Name)
+		hc := &hypershiftv1beta1.HostedCluster{}
+		err := r.Get(ctx, types.NamespacedName{Name: hostedcontrolplane.Name, Namespace: hcNamespace}, hc)
+		if err != nil {
+			// If we can't read the HC, fall back to trusting the HCP label
+			log.Info("Could not read HostedCluster to verify LS status, trusting HCP label", "cluster_id", clusterID, "error", err.Error())
+			isLimitedSupport = true
+		} else if hc.Labels["api.openshift.com/limited-support"] == "true" {
+			isLimitedSupport = true
+		} else {
+			log.Info("HCP has stale limited-support label (HC label cleared), ignoring", "cluster_id", clusterID)
+		}
+	}
+	if isLimitedSupport {
 		client := r.createRHOBSClient(log, cfg)
 		existingProbe, err := client.GetProbe(ctx, clusterID)
 		if err != nil {
@@ -308,6 +330,7 @@ func (r *HostedControlPlaneReconciler) ensureRHOBSProbe(ctx context.Context, log
 	// Get monitoring URL (API server health endpoint in this case)
 	monitoringURL, err := GetAPIServerHostname(hostedcontrolplane)
 	if err != nil {
+		log.Info("Failed to get API server hostname for probe", "cluster_id", clusterID, "error", err.Error())
 		return fmt.Errorf("failed to get API server hostname: %w", err)
 	}
 	monitoringURL = fmt.Sprintf("https://%s/livez", monitoringURL)
@@ -392,6 +415,8 @@ func (r *HostedControlPlaneReconciler) ensureRHOBSProbe(ctx context.Context, log
 
 	// Create probe request with region label for regional filtering
 	probeReq := rhobs.NewClusterProbeRequest(clusterID, monitoringURL, clusterRegion, isPrivate)
+
+	log.Info("Creating new RHOBS probe", "cluster_id", clusterID, "monitoring_url", monitoringURL, "private", isPrivate, "region", clusterRegion)
 
 	// Create the probe
 	probe, err := client.CreateProbe(ctx, probeReq)
