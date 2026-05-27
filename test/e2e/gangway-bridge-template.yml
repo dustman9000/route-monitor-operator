@@ -1,0 +1,177 @@
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: gangway-bridge-e2e
+parameters:
+  - name: JOB_NAME
+    required: true
+    description: Prow periodic job name to trigger via Gangway
+  - name: POLL_INTERVAL
+    value: "60"
+    description: Seconds between status polls
+  - name: TIMEOUT
+    value: "3600"
+    description: Maximum seconds to wait for job completion
+  - name: JOB_ENVS
+    value: ""
+    description: Comma-separated KEY=VALUE pairs passed to the Prow job (e.g. OCM_LOGIN_ENV=integration)
+  - name: JOBID
+    generate: expression
+    from: "[0-9a-z]{7}"
+  - name: IMAGE_TAG
+    value: ''
+    required: true
+objects:
+  - apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: gangway-bridge-${IMAGE_TAG}-${JOBID}
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 7200
+      template:
+        spec:
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          containers:
+            - name: gangway-bridge
+              image: registry.access.redhat.com/ubi9/ubi-minimal:9.5
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -o nounset
+                  set -o errexit
+                  set -o pipefail
+
+                  GANGWAY_URL="https://gangway-ci.apps.ci.l2s4.p1.openshiftapps.com/v1/executions"
+                  CURL_CONNECT_TIMEOUT=10
+                  CURL_MAX_TIME=30
+                  MAX_RETRIES=3
+                  RETRY_WAIT=10
+
+                  log() { echo -e "\033[1m$(date '+%Y-%m-%dT%H:%M:%S') ${*}\033[0m" >&2; }
+
+                  log "Triggering Prow job: ${JOB_NAME}"
+                  log "  Poll interval: ${POLL_INTERVAL}s"
+                  log "  Timeout: ${TIMEOUT}s"
+
+                  # Build the request body with optional env overrides
+                  REQUEST_BODY='{"job_execution_type": "1"}'
+                  if [[ -n "${JOB_ENVS:-}" ]]; then
+                      log "  Env overrides: $(echo "${JOB_ENVS}" | sed 's/=[^,]*/=***/g')"
+                      ENVS_JSON="{"
+                      FIRST=true
+                      IFS=',' read -ra ENV_LIST <<< "${JOB_ENVS}"
+                      for entry in "${ENV_LIST[@]}"; do
+                          key="${entry%%=*}"
+                          value="${entry#*=}"
+                          ${FIRST} || ENVS_JSON="${ENVS_JSON},"
+                          ENVS_JSON="${ENVS_JSON}\"${key}\":\"${value}\""
+                          FIRST=false
+                      done
+                      ENVS_JSON="${ENVS_JSON}}"
+                      REQUEST_BODY="{\"job_execution_type\": \"1\", \"pod_spec_options\": {\"envs\": ${ENVS_JSON}}}"
+                  fi
+
+                  # Trigger with retries
+                  TRIGGER_BODY=""
+                  for attempt in $(seq 1 "${MAX_RETRIES}"); do
+                      response=$(curl -sSL --connect-timeout "${CURL_CONNECT_TIMEOUT}" --max-time "${CURL_MAX_TIME}" \
+                          -w "\n%{http_code}" \
+                          -X POST \
+                          -H "Authorization: Bearer ${GANGWAY_TOKEN}" \
+                          -H "Content-Type: application/json" \
+                          -d "${REQUEST_BODY}" \
+                          "${GANGWAY_URL}/${JOB_NAME}" 2>/dev/null) || true
+
+                      http_code=$(echo "${response}" | tail -1)
+                      body=$(echo "${response}" | sed '$d')
+
+                      if [[ "${http_code}" == "200" ]]; then
+                          TRIGGER_BODY="${body}"
+                          break
+                      fi
+
+                      log "Trigger attempt ${attempt}/${MAX_RETRIES} failed (HTTP ${http_code})"
+                      if [[ ${attempt} -lt ${MAX_RETRIES} ]]; then
+                          sleep ${RETRY_WAIT}
+                      fi
+                  done
+
+                  if [[ -z "${TRIGGER_BODY}" ]]; then
+                      log "ERROR: Failed to trigger job after ${MAX_RETRIES} attempts"
+                      exit 1
+                  fi
+
+                  # Extract job ID without jq
+                  JOB_ID=$(echo "${TRIGGER_BODY}" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+                  if [[ -z "${JOB_ID}" ]]; then
+                      log "ERROR: Could not extract job ID from trigger response"
+                      exit 1
+                  fi
+
+                  log "Job triggered successfully"
+                  log "  Job ID: ${JOB_ID}"
+                  log "  Prow: https://prow.ci.openshift.org/view/gs/test-platform-results/logs/${JOB_NAME}/${JOB_ID}"
+
+                  # Poll for completion
+                  START_TIME=$(date +%s)
+                  while true; do
+                      ELAPSED=$(( $(date +%s) - START_TIME ))
+                      if [[ ${ELAPSED} -ge ${TIMEOUT} ]]; then
+                          log "ERROR: Timeout after ${TIMEOUT}s waiting for job ${JOB_ID}"
+                          exit 1
+                      fi
+
+                      sleep "${POLL_INTERVAL}"
+
+                      STATUS_RESPONSE=$(curl -sSL --connect-timeout "${CURL_CONNECT_TIMEOUT}" --max-time "${CURL_MAX_TIME}" \
+                          -H "Authorization: Bearer ${GANGWAY_TOKEN}" \
+                          "${GANGWAY_URL}/${JOB_ID}" 2>/dev/null) || STATUS_RESPONSE=""
+
+                      JOB_STATUS=$(echo "${STATUS_RESPONSE}" | grep -o '"job_status":"[^"]*"' | head -1 | cut -d'"' -f4)
+                      JOB_STATUS="${JOB_STATUS:-UNKNOWN}"
+
+                      ELAPSED=$(( $(date +%s) - START_TIME ))
+                      log "Status: ${JOB_STATUS} (${ELAPSED}s elapsed)"
+
+                      case "${JOB_STATUS}" in
+                          SUCCESS)
+                              log "Job ${JOB_ID} succeeded"
+                              exit 0
+                              ;;
+                          FAILURE|ABORTED|ERROR)
+                              log "Job ${JOB_ID} failed with status: ${JOB_STATUS}"
+                              exit 1
+                              ;;
+                      esac
+                  done
+              env:
+                - name: JOB_NAME
+                  value: ${JOB_NAME}
+                - name: GANGWAY_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: gangway-api-token
+                      key: token
+                - name: POLL_INTERVAL
+                  value: ${POLL_INTERVAL}
+                - name: TIMEOUT
+                  value: ${TIMEOUT}
+                - name: JOB_ENVS
+                  value: ${JOB_ENVS}
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "64Mi"
+                limits:
+                  cpu: "100m"
+                  memory: "128Mi"
+              securityContext:
+                runAsNonRoot: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+                seccompProfile:
+                  type: RuntimeDefault
